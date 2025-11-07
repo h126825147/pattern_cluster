@@ -3,10 +3,24 @@
 
 #include "utils.h"
 #include <cstddef>
+#include <vector>
+#include <cmath>
 
 
 namespace pattern_cluster {
 using namespace medb2;
+
+/**
+ * @brief Structure to hold extracted features for a pattern
+ */
+struct PatternFeatures {
+    size_t marker_idx;          // Index of the marker
+    PointI center;              // Center point of the pattern
+    double area;                // Total area of polygons
+    double density;             // Polygon density in the pattern region
+    std::vector<double> hu_moments;  // Hu moments for shape description
+    std::vector<double> dct_features; // DCT features for pattern matching
+};
 /**
  * @brief Defines the input parameter structure for the `PatternCluster` function, 
  * containing various parameters required for pattern clustering.

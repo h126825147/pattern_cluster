@@ -1,0 +1,14 @@
+# Build artifacts
+pattern_cluster/build/
+pattern_cluster/output/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
