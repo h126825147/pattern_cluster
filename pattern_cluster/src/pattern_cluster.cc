@@ -68,9 +68,9 @@ static std::vector<PatternFeatures> ExtractPatternFeatures(
         int32_t top = center_y + static_cast<int32_t>(pattern_radius);
         BoxI pattern_box(left, bottom, right, top);
         
-        // Extract shapes within pattern region and calculate features
-        double total_area = 0.0;
-        size_t polygon_count = 0;
+        // Use utility function to get shapes within the pattern region
+        // Note: Since we don't have a Layout pointer here, we'll use manual intersection
+        vector<PolygonDataI> pattern_shapes;
         
         for (const auto &shape : shapes) {
             // Check if shape intersects with pattern region
@@ -87,14 +87,43 @@ static std::vector<PatternFeatures> ExtractPatternFeatures(
             }
             
             if (intersects) {
-                total_area += CalculatePolygonArea(shape);
-                polygon_count++;
+                pattern_shapes.push_back(shape);
             }
+        }
+        
+        // Calculate total area and density
+        double total_area = 0.0;
+        for (const auto &shape : pattern_shapes) {
+            total_area += CalculatePolygonArea(shape);
         }
         
         feat.area = total_area;
         double region_area = static_cast<double>(pattern_radius * 2) * static_cast<double>(pattern_radius * 2);
         feat.density = region_area > 0 ? total_area / region_area : 0.0;
+        
+        // Generate DCT features if there are shapes in the pattern
+        if (!pattern_shapes.empty() && pattern_radius > 0) {
+            try {
+                PatternContents pattern_content;
+                pattern_content.pattern_box = pattern_box;
+                pattern_content.polygons = pattern_shapes;
+                
+                // Rasterize the pattern (use size 32 for efficiency)
+                size_t raster_size = 32;
+                auto raster_matrix = Rasterize(pattern_content, raster_size);
+                
+                // Flatten and apply DCT
+                auto flattened = Flatten(raster_matrix);
+                auto dct_result = FFTWDCT(flattened, raster_size, raster_size);
+                
+                // Keep only low-frequency components for feature representation
+                size_t feature_count = std::min(size_t(64), dct_result.size());
+                feat.dct_features.assign(dct_result.begin(), dct_result.begin() + feature_count);
+            } catch (...) {
+                // If rasterization fails, leave dct_features empty
+                feat.dct_features.clear();
+            }
+        }
         
         features.push_back(feat);
     }
@@ -113,8 +142,23 @@ static double CalculateFeatureDistance(const PatternFeatures &f1, const PatternF
     double dy = static_cast<double>(f1.center.Y() - f2.center.Y());
     double centroid_dist = std::sqrt(dx * dx + dy * dy);
     
-    // Weighted combination
-    return std::sqrt(area_diff * area_diff + density_diff * density_diff * 10.0 + centroid_dist * 0.0001);
+    // If DCT features are available, use them for more accurate comparison
+    double dct_dist = 0.0;
+    if (!f1.dct_features.empty() && !f2.dct_features.empty()) {
+        // Use cosine similarity between DCT features
+        double cos_sim = CosSimilarity(f1.dct_features, f2.dct_features);
+        // Convert similarity to distance (1 - similarity)
+        dct_dist = 1.0 - cos_sim;
+    }
+    
+    // Weighted combination (adjust weights based on feature availability)
+    if (!f1.dct_features.empty() && !f2.dct_features.empty()) {
+        return std::sqrt(area_diff * area_diff * 0.5 + density_diff * density_diff * 5.0 + 
+                        centroid_dist * 0.00001 + dct_dist * dct_dist * 10.0);
+    } else {
+        return std::sqrt(area_diff * area_diff + density_diff * density_diff * 10.0 + 
+                        centroid_dist * 0.0001);
+    }
 }
 
 // Stage 1: Initial clustering using area and density features
@@ -179,8 +223,7 @@ static std::vector<std::vector<size_t>> Stage1Clustering(
 
 // Stage 2: Refine clusters using DCT-based similarity
 static std::vector<std::vector<size_t>> Stage2Clustering(
-    const vector<PolygonDataI> &shapes,
-    const vector<BoxI> &markers,
+    const std::vector<PatternFeatures> &features,
     const std::vector<std::vector<size_t>> &stage1_clusters,
     const InputParams &params) {
     
@@ -197,7 +240,7 @@ static std::vector<std::vector<size_t>> Stage2Clustering(
         
         // For larger clusters, check cosine similarity if constraint is set
         if (params.cosine_similarity_constraint_ > 0.0) {
-            // Calculate representative pattern for the cluster
+            // Split cluster based on cosine similarity threshold
             std::vector<std::vector<size_t>> sub_clusters;
             std::unordered_set<size_t> assigned;
             
@@ -208,85 +251,33 @@ static std::vector<std::vector<size_t>> Stage2Clustering(
                 sub_cluster.push_back(idx);
                 assigned.insert(idx);
                 
-                // Extract pattern for this marker
-                BoxI marker_box = markers[idx];
-                int32_t center_x = (marker_box.Left() + marker_box.Right()) / 2;
-                int32_t center_y = (marker_box.Bottom() + marker_box.Top()) / 2;
+                const auto &ref_feat = features[idx];
                 
-                BoxI pattern_box(
-                    center_x - static_cast<int32_t>(params.pattern_radius_),
-                    center_y - static_cast<int32_t>(params.pattern_radius_),
-                    center_x + static_cast<int32_t>(params.pattern_radius_),
-                    center_y + static_cast<int32_t>(params.pattern_radius_)
-                );
-                
-                // Collect shapes in this pattern
-                vector<PolygonDataI> pattern_shapes;
-                for (const auto &shape : shapes) {
-                    bool intersects = false;
-                    for (const auto &ring : shape) {
-                        for (const auto &pt : ring) {
-                            if (pt.X() >= pattern_box.Left() && pt.X() <= pattern_box.Right() &&
-                                pt.Y() >= pattern_box.Bottom() && pt.Y() <= pattern_box.Top()) {
-                                intersects = true;
-                                break;
-                            }
-                        }
-                        if (intersects) break;
-                    }
-                    if (intersects) {
-                        pattern_shapes.push_back(shape);
-                    }
-                }
-                
-                // Try to rasterize and compute DCT for comparison
-                PatternContents ref_pattern;
-                ref_pattern.pattern_box = pattern_box;
-                ref_pattern.polygons = pattern_shapes;
-                
-                // Find similar patterns in the remaining items
+                // Find similar patterns based on DCT features
                 for (size_t other_idx : cluster) {
                     if (assigned.count(other_idx)) continue;
                     
-                    BoxI other_marker = markers[other_idx];
-                    int32_t other_cx = (other_marker.Left() + other_marker.Right()) / 2;
-                    int32_t other_cy = (other_marker.Bottom() + other_marker.Top()) / 2;
+                    const auto &cand_feat = features[other_idx];
                     
-                    BoxI other_pattern_box(
-                        other_cx - static_cast<int32_t>(params.pattern_radius_),
-                        other_cy - static_cast<int32_t>(params.pattern_radius_),
-                        other_cx + static_cast<int32_t>(params.pattern_radius_),
-                        other_cy + static_cast<int32_t>(params.pattern_radius_)
-                    );
-                    
-                    vector<PolygonDataI> other_shapes;
-                    for (const auto &shape : shapes) {
-                        bool intersects = false;
-                        for (const auto &ring : shape) {
-                            for (const auto &pt : ring) {
-                                if (pt.X() >= other_pattern_box.Left() && pt.X() <= other_pattern_box.Right() &&
-                                    pt.Y() >= other_pattern_box.Bottom() && pt.Y() <= other_pattern_box.Top()) {
-                                    intersects = true;
-                                    break;
-                                }
-                            }
-                            if (intersects) break;
+                    // Check cosine similarity if DCT features are available
+                    if (!ref_feat.dct_features.empty() && !cand_feat.dct_features.empty()) {
+                        double cos_sim = CosSimilarity(ref_feat.dct_features, cand_feat.dct_features);
+                        
+                        // If similarity exceeds threshold, add to this sub-cluster
+                        if (cos_sim >= params.cosine_similarity_constraint_) {
+                            sub_cluster.push_back(other_idx);
+                            assigned.insert(other_idx);
                         }
-                        if (intersects) {
-                            other_shapes.push_back(shape);
+                    } else {
+                        // Fallback to area and density similarity
+                        double area_ratio = std::min(ref_feat.area, cand_feat.area) / 
+                                          (std::max(ref_feat.area, cand_feat.area) + 1e-10);
+                        double density_diff = std::abs(ref_feat.density - cand_feat.density);
+                        
+                        if (area_ratio > 0.8 && density_diff < 0.1) {
+                            sub_cluster.push_back(other_idx);
+                            assigned.insert(other_idx);
                         }
-                    }
-                    
-                    PatternContents cand_pattern;
-                    cand_pattern.pattern_box = other_pattern_box;
-                    cand_pattern.polygons = other_shapes;
-                    
-                    // Simplified similarity check: compare polygon counts and areas
-                    if (pattern_shapes.size() == other_shapes.size() || 
-                        std::abs(static_cast<int>(pattern_shapes.size()) - 
-                                static_cast<int>(other_shapes.size())) <= 2) {
-                        sub_cluster.push_back(other_idx);
-                        assigned.insert(other_idx);
                     }
                 }
                 
@@ -297,6 +288,7 @@ static std::vector<std::vector<size_t>> Stage2Clustering(
                                    sub_clusters.begin(), 
                                    sub_clusters.end());
         } else {
+            // No cosine similarity constraint, keep the cluster as is
             refined_clusters.push_back(cluster);
         }
     }
@@ -353,7 +345,7 @@ void PatternCluster(vector<PolygonDataI> &shapes, vector<BoxI> &markers, InputPa
     
     // Step 3: Stage 2 refinement using detailed similarity
     std::vector<std::vector<size_t>> final_clusters = Stage2Clustering(
-        shapes, markers, stage1_clusters, params);
+        features, stage1_clusters, params);
     
     // Step 4: Determine cluster centers and format output
     for (auto &cluster : final_clusters) {
