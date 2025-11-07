@@ -1,0 +1,5 @@
+medb REPO url        : https://gitee.com/edahelper/medb.git
+medb REPO branch     : master
+medb Commit ID       : d758aa014f88fa6debd4537c5721a325e9feef5d
+medb Short Commit ID : d758aa0
+medb BUILD TIME      : 20251009111536
