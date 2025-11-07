@@ -24,7 +24,10 @@ PatternContents ExtractPattern(const vector<PolygonDataI>& shapes, const PointI&
 }
 
 // 计算两个pattern的余弦相似度
-double CalculatePatternSimilarity(const PatternContents& p1, const PatternContents& p2, size_t raster_size = 64) {
+// 栅格化尺寸：64x64提供了精度和性能的平衡
+double CalculatePatternSimilarity(const PatternContents& p1, const PatternContents& p2) {
+    const size_t raster_size = 64;  // 栅格化尺寸
+    
     // 栅格化pattern
     auto matrix1 = Rasterize(p1, raster_size);
     auto matrix2 = Rasterize(p2, raster_size);
@@ -69,11 +72,13 @@ bool CheckEdgeMovementConstraint(const PatternContents& p1, const PatternContent
     
     // 使用图形数量作为启发式判断
     // 如果两个pattern的图形数量接近，则更可能满足约束
+    // 定义图形数量差异阈值：不超过较小pattern的一半
     size_t count_diff = (polys1.size() > polys2.size()) ? 
                         (polys1.size() - polys2.size()) : (polys2.size() - polys1.size());
+    size_t min_count = std::min(polys1.size(), polys2.size());
     
-    // 如果图形数量差异过大（超过一半），不太可能满足约束
-    if (count_diff > polys1.size() / 2 && count_diff > polys2.size() / 2) {
+    // 如果图形数量差异过大，不太可能满足约束
+    if (count_diff > min_count / 2) {
         return false;
     }
     
@@ -321,17 +326,26 @@ void PatternCluster(vector<PolygonDataI> &shapes, vector<BoxI> &markers, InputPa
         if (cluster.size() <= 1) continue;
         
         // 计算聚类中所有pattern中心点的几何中心（重心）
-        int64_t sum_x = 0, sum_y = 0;
+        // 使用double精度计算以避免整数除法的精度损失
+        double sum_x = 0.0, sum_y = 0.0;
         for (size_t idx : cluster) {
             sum_x += pattern_centers[idx].X();
             sum_y += pattern_centers[idx].Y();
         }
-        PointI centroid(sum_x / cluster.size(), sum_y / cluster.size());
+        PointI centroid(static_cast<int>(sum_x / cluster.size()), 
+                       static_cast<int>(sum_y / cluster.size()));
         
         // 找到距离几何中心最近的pattern作为聚类的代表
         size_t best_idx = 0;
         int64_t min_dist = std::numeric_limits<int64_t>::max();
-        for (size_t i = 0; i < cluster.size(); ++i) {
+        
+        // 计算第一个pattern的距离作为初始最小值
+        const PointI& first_p = pattern_centers[cluster[0]];
+        int64_t first_dx = first_p.X() - centroid.X();
+        int64_t first_dy = first_p.Y() - centroid.Y();
+        min_dist = first_dx * first_dx + first_dy * first_dy;
+        
+        for (size_t i = 1; i < cluster.size(); ++i) {
             const PointI& p = pattern_centers[cluster[i]];
             int64_t dx = p.X() - centroid.X();
             int64_t dy = p.Y() - centroid.Y();
