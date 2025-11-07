@@ -1,0 +1,12 @@
+# Build directories
+build/
+output/
+
+# IDE
+.vscode/
+.idea/
+
+# Temporary files
+*.swp
+*.swo
+*~
