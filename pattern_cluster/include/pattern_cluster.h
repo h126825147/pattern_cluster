@@ -18,7 +18,6 @@ struct PatternFeatures {
     PointI center;              // Center point of the pattern
     double area;                // Total area of polygons
     double density;             // Polygon density in the pattern region
-    std::vector<double> hu_moments;  // Hu moments for shape description
     std::vector<double> dct_features; // DCT features for pattern matching
 };
 /**

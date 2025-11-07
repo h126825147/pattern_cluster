@@ -7,6 +7,15 @@
 
 namespace pattern_cluster {
 
+// Feature weight constants for distance calculation
+constexpr double WEIGHT_AREA = 0.5;
+constexpr double WEIGHT_DENSITY = 5.0;
+constexpr double WEIGHT_CENTROID = 0.00001;
+constexpr double WEIGHT_DCT = 10.0;
+constexpr double WEIGHT_AREA_NO_DCT = 1.0;
+constexpr double WEIGHT_DENSITY_NO_DCT = 10.0;
+constexpr double WEIGHT_CENTROID_NO_DCT = 0.0001;
+
 // Helper function to calculate polygon area
 static double CalculatePolygonArea(const PolygonDataI &polygon) {
     double total_area = 0.0;
@@ -69,21 +78,34 @@ static std::vector<PatternFeatures> ExtractPatternFeatures(
         BoxI pattern_box(left, bottom, right, top);
         
         // Use utility function to get shapes within the pattern region
-        // Note: Since we don't have a Layout pointer here, we'll use manual intersection
+        // Note: Since we don't have a Layout pointer here, we'll use improved intersection check
         vector<PolygonDataI> pattern_shapes;
         
         for (const auto &shape : shapes) {
-            // Check if shape intersects with pattern region
+            // Check if shape intersects with pattern region using bounding box check first
             bool intersects = false;
+            
+            // Check each ring of the polygon
             for (const auto &ring : shape) {
+                if (ring.empty()) continue;
+                
+                // Calculate ring bounding box
+                int32_t ring_left = ring[0].X(), ring_right = ring[0].X();
+                int32_t ring_bottom = ring[0].Y(), ring_top = ring[0].Y();
+                
                 for (const auto &pt : ring) {
-                    if (pt.X() >= left && pt.X() <= right &&
-                        pt.Y() >= bottom && pt.Y() <= top) {
-                        intersects = true;
-                        break;
-                    }
+                    ring_left = std::min(ring_left, pt.X());
+                    ring_right = std::max(ring_right, pt.X());
+                    ring_bottom = std::min(ring_bottom, pt.Y());
+                    ring_top = std::max(ring_top, pt.Y());
                 }
-                if (intersects) break;
+                
+                // Check if ring's bounding box intersects with pattern box
+                if (!(ring_right < left || ring_left > right || 
+                      ring_top < bottom || ring_bottom > top)) {
+                    intersects = true;
+                    break;
+                }
             }
             
             if (intersects) {
@@ -134,13 +156,13 @@ static std::vector<PatternFeatures> ExtractPatternFeatures(
 // Calculate Euclidean distance between two feature vectors
 static double CalculateFeatureDistance(const PatternFeatures &f1, const PatternFeatures &f2) {
     // Use area and density as primary features
-    double area_diff = (f1.area - f2.area) / (std::max(f1.area, f2.area) + 1e-10);
+    double area_diff = std::abs(f1.area - f2.area) / (std::max(f1.area, f2.area) + 1e-10);
     double density_diff = std::abs(f1.density - f2.density);
     
-    // Calculate centroid distance normalized by pattern size
+    // Calculate centroid distance squared (avoid unnecessary sqrt)
     double dx = static_cast<double>(f1.center.X() - f2.center.X());
     double dy = static_cast<double>(f1.center.Y() - f2.center.Y());
-    double centroid_dist = std::sqrt(dx * dx + dy * dy);
+    double centroid_dist_sq = dx * dx + dy * dy;
     
     // If DCT features are available, use them for more accurate comparison
     double dct_dist = 0.0;
@@ -153,11 +175,14 @@ static double CalculateFeatureDistance(const PatternFeatures &f1, const PatternF
     
     // Weighted combination (adjust weights based on feature availability)
     if (!f1.dct_features.empty() && !f2.dct_features.empty()) {
-        return std::sqrt(area_diff * area_diff * 0.5 + density_diff * density_diff * 5.0 + 
-                        centroid_dist * 0.00001 + dct_dist * dct_dist * 10.0);
+        return std::sqrt(area_diff * area_diff * WEIGHT_AREA + 
+                        density_diff * density_diff * WEIGHT_DENSITY + 
+                        centroid_dist_sq * WEIGHT_CENTROID + 
+                        dct_dist * dct_dist * WEIGHT_DCT);
     } else {
-        return std::sqrt(area_diff * area_diff + density_diff * density_diff * 10.0 + 
-                        centroid_dist * 0.0001);
+        return std::sqrt(area_diff * area_diff * WEIGHT_AREA_NO_DCT + 
+                        density_diff * density_diff * WEIGHT_DENSITY_NO_DCT + 
+                        centroid_dist_sq * WEIGHT_CENTROID_NO_DCT);
     }
 }
 
