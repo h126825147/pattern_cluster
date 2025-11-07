@@ -16,6 +16,17 @@ constexpr double WEIGHT_AREA_NO_DCT = 1.0;
 constexpr double WEIGHT_DENSITY_NO_DCT = 10.0;
 constexpr double WEIGHT_CENTROID_NO_DCT = 0.0001;
 
+// DCT feature extraction constants
+constexpr size_t DEFAULT_RASTER_SIZE = 32;  // Raster size for pattern representation
+constexpr size_t MAX_DCT_FEATURES = 64;     // Number of low-frequency DCT coefficients to keep
+
+// Stage 2 clustering thresholds (when DCT features unavailable)
+constexpr double FALLBACK_AREA_RATIO_THRESHOLD = 0.8;
+constexpr double FALLBACK_DENSITY_DIFF_THRESHOLD = 0.1;
+
+// Epsilon for division by zero protection
+constexpr double EPSILON = 1e-10;
+
 // Helper function to calculate polygon area
 static double CalculatePolygonArea(const PolygonDataI &polygon) {
     double total_area = 0.0;
@@ -120,7 +131,8 @@ static std::vector<PatternFeatures> ExtractPatternFeatures(
         }
         
         feat.area = total_area;
-        double region_area = static_cast<double>(pattern_radius * 2) * static_cast<double>(pattern_radius * 2);
+        double region_area = static_cast<double>(pattern_radius) * 2.0 * 
+                            static_cast<double>(pattern_radius) * 2.0;
         feat.density = region_area > 0 ? total_area / region_area : 0.0;
         
         // Generate DCT features if there are shapes in the pattern
@@ -130,16 +142,15 @@ static std::vector<PatternFeatures> ExtractPatternFeatures(
                 pattern_content.pattern_box = pattern_box;
                 pattern_content.polygons = pattern_shapes;
                 
-                // Rasterize the pattern (use size 32 for efficiency)
-                size_t raster_size = 32;
-                auto raster_matrix = Rasterize(pattern_content, raster_size);
+                // Rasterize the pattern
+                auto raster_matrix = Rasterize(pattern_content, DEFAULT_RASTER_SIZE);
                 
                 // Flatten and apply DCT
                 auto flattened = Flatten(raster_matrix);
-                auto dct_result = FFTWDCT(flattened, raster_size, raster_size);
+                auto dct_result = FFTWDCT(flattened, DEFAULT_RASTER_SIZE, DEFAULT_RASTER_SIZE);
                 
                 // Keep only low-frequency components for feature representation
-                size_t feature_count = std::min(size_t(64), dct_result.size());
+                size_t feature_count = std::min(MAX_DCT_FEATURES, dct_result.size());
                 feat.dct_features.assign(dct_result.begin(), dct_result.begin() + feature_count);
             } catch (...) {
                 // If rasterization fails, leave dct_features empty
@@ -156,7 +167,8 @@ static std::vector<PatternFeatures> ExtractPatternFeatures(
 // Calculate Euclidean distance between two feature vectors
 static double CalculateFeatureDistance(const PatternFeatures &f1, const PatternFeatures &f2) {
     // Use area and density as primary features
-    double area_diff = std::abs(f1.area - f2.area) / (std::max(f1.area, f2.area) + 1e-10);
+    double max_area = std::max({f1.area, f2.area, EPSILON});
+    double area_diff = std::abs(f1.area - f2.area) / max_area;
     double density_diff = std::abs(f1.density - f2.density);
     
     // Calculate centroid distance squared (avoid unnecessary sqrt)
@@ -295,11 +307,12 @@ static std::vector<std::vector<size_t>> Stage2Clustering(
                         }
                     } else {
                         // Fallback to area and density similarity
-                        double area_ratio = std::min(ref_feat.area, cand_feat.area) / 
-                                          (std::max(ref_feat.area, cand_feat.area) + 1e-10);
+                        double max_area = std::max({ref_feat.area, cand_feat.area, EPSILON});
+                        double area_ratio = std::min(ref_feat.area, cand_feat.area) / max_area;
                         double density_diff = std::abs(ref_feat.density - cand_feat.density);
                         
-                        if (area_ratio > 0.8 && density_diff < 0.1) {
+                        if (area_ratio > FALLBACK_AREA_RATIO_THRESHOLD && 
+                            density_diff < FALLBACK_DENSITY_DIFF_THRESHOLD) {
                             sub_cluster.push_back(other_idx);
                             assigned.insert(other_idx);
                         }
